@@ -20,7 +20,8 @@
 #include <QFileInfo>
 #include <QDebug>
 
-PyTypeObject** SbkmaliitTypes;
+// FIXME: Hardcoded classes from 0.80 plugins API. Maybe we'll need one
+// factory for each plugin api.
 
 namespace {
     MInputMethodPlugin *loadPythonFile(const QString &pythonFile)
@@ -35,14 +36,7 @@ namespace {
         Shiboken::init();
         Shiboken::GilState pyGil;
 
-        Shiboken::importModule("maliit", &SbkmaliitTypes);
-        Shiboken::TypeResolver* sbkType = Shiboken::TypeResolver::get("MInputMethodPlugin*");
-        if (!sbkType) {
-            qWarning() << "Plugin type not found.";
-            return 0;
-        }
-        PyObject *pluginType = reinterpret_cast<PyObject*>(sbkType->pythonType());
-
+        // Dummy locals
         mainModule = PyImport_AddModule("__main__");
         mainLocals = PyModule_GetDict(mainModule);
 
@@ -54,32 +48,44 @@ namespace {
             PyList_Insert(sys_path, 0, path);
         Py_DECREF(path);
 
+        // Actually load the python plugin
         fromlist = PyTuple_New(0);
-        qDebug() << "PATH" <<  pythonFile << "name" << pluginPath.baseName();
         module = PyImport_ImportModuleEx(const_cast<char*>(qPrintable(pluginPath.baseName())), mainLocals, mainLocals, fromlist);
         Py_DECREF(fromlist);
         if (!module) {
             PyErr_Print();
+            Py_DECREF(mainModule);
             return 0;
         }
+
+        // Now that maliit is already loaded, get the plugin type to check for
+        // plugin implementations in the module.
+        Shiboken::TypeResolver* sbkType = Shiboken::TypeResolver::get("MInputMethodPlugin*");
+        if (!sbkType) {
+            qWarning() << "Plugin type not found.";
+            Py_DECREF(module);
+            Py_DECREF(mainModule);
+            return 0;
+        }
+        PyObject *pluginType = reinterpret_cast<PyObject*>(sbkType->pythonType());
 
         Py_ssize_t pos=0;
         PyObject *key;
         PyObject *value;
         PyObject *locals = PyModule_GetDict (module);
-        bool error = false;
 
+        // Search for the plugin class
         while(PyDict_Next(locals, &pos, &key, &value)) {
             if (!PyType_Check(value))
                 continue;
 
             if (PyObject_IsSubclass (value, pluginType) && (value != pluginType)) {
+                // Instantiate the plugin
                 PyObject *args = PyTuple_New(0);
                 PyObject *pyPlugin = PyObject_Call(value, args, 0);
                 Py_DECREF(args);
                 if (!pyPlugin || PyErr_Occurred()) {
                     PyErr_Print();
-                    error = true;
                     break;
                 }
                 pluginObject = reinterpret_cast<MInputMethodPlugin*>(Shiboken::Object::cppPointer(reinterpret_cast<SbkObject*>(pyPlugin),
